@@ -18,13 +18,7 @@ Group project (three students) on short-term price prediction with horizons of h
 | `SOURCES.md` | Data source log (origin, retrieval date, price adjustment) |
 | `requirements.txt` | Python dependencies (added once the group decides) |
 
-## Team and responsibilities
 
-| Member | GitHub | Responsibility |
-|---|---|---|
-| _TBD_ | _TBD_ | Data and features |
-| _TBD_ | _TBD_ | Models and baselines |
-| _TBD_ | _TBD_ | Evaluation and prediction intervals |
 
 ## Note
 
