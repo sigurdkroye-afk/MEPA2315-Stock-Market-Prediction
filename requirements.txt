@@ -1,1 +1,7 @@
 # Dependencies are added once the group has decided which libraries to use.
+numpy
+pandas
+scikit-learn
+torch
+tabulate
+pytest

@@ -14,6 +14,12 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
+# Model files / LSTM
+*.pt
+*.pth
+checkpoints/
+reports/lstm/quick/
+
 # Secrets
 .env
 
