@@ -144,12 +144,21 @@ class LSTMRegressor:
         X = np.ascontiguousarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.float64)
 
+        if self.n_seeds < 1:
+            raise ValueError("n_seeds must be at least 1")
+        if len(X) != len(y):
+            raise ValueError("X and y must have the same number of samples")
+        if len(y) == 0 or float(y.std()) == 0.0:
+            raise ValueError("y must be non-empty and not constant")
+
         self.y_mean_, self.y_std_ = float(y.mean()), float(y.std())
         ys = ((y - self.y_mean_) / self.y_std_).astype(np.float32)
 
         # Chronological early-stopping split inside the training period.
         n_es = int(round(self.es_fraction * len(X)))
         cut = len(X) - n_es
+        if n_es < 1 or cut - self.embargo < 1:
+            raise ValueError("too few samples: early-stopping part and fit part (after embargo) must both be non-empty")
         X_fit, y_fit = X[:cut - self.embargo], ys[:cut - self.embargo]
         X_es, y_es = X[cut:], ys[cut:]
 
