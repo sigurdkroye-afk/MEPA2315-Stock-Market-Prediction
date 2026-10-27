@@ -37,6 +37,9 @@ from lstm_model import LSTMRegressor  # noqa: E402
 
 OUT = ROOT / "reports" / "lstm"
 HORIZONS = [3, 5, 10]
+# The final model = config.json + these inputs in exactly this order. Used by both the
+# val run (summary, val_predictions.csv) and --test, so the two cannot diverge.
+FINAL_FEATURES = list(BASE_FEATURES)
 
 
 # ---------------------------------------------------------------- statistics
@@ -127,7 +130,7 @@ def main():
         rows, preds = [], []
         for stock in STOCKS:
             for h in HORIZONS:
-                r, p = run_one(df, stock, h, cfg, BASE_FEATURES, n_seeds, part="test", keep_pred=True)
+                r, p = run_one(df, stock, h, cfg, FINAL_FEATURES, n_seeds, part="test", keep_pred=True)
                 rows.append(r); preds.append(p)
         pd.DataFrame(rows).to_csv(OUT / "test_results.csv", index=False)
         pd.concat(preds).to_csv(OUT / "test_predictions.csv", index=False)
@@ -160,27 +163,34 @@ def main():
     print("chosen config:", best)
 
     # 2) Input ablation with the chosen config: add input groups one at a time.
-    abl_rows, val_preds = [], []
+    abl_rows = []
     for stock in STOCKS:
         for h in HORIZONS:
             for name, feats in feature_groups(stock).items():
-                last = name.startswith("+ global")
-                r, p = run_one(df, stock, h, best, feats, n_seeds, keep_pred=last)
+                r, _ = run_one(df, stock, h, best, feats, n_seeds)
                 r["inputs"] = name
                 abl_rows.append(r)
-                if last:
-                    val_preds.append(p)
                 print(f"[{time.time() - t0:6.0f}s] ablation {stock} h={h} {name}: "
                       f"rmse_ratio={r['rmse_ratio']:.4f}", flush=True)
     abl_df = pd.DataFrame(abl_rows)
     abl_df.to_csv(OUT / "ablation_val.csv", index=False)
+
+    # 3) The final model (chosen config, FINAL_FEATURES) on val: the same model that --test runs.
+    final_rows, val_preds = [], []
+    for stock in STOCKS:
+        for h in HORIZONS:
+            r, p = run_one(df, stock, h, best, FINAL_FEATURES, n_seeds, keep_pred=True)
+            final_rows.append(r)
+            val_preds.append(p)
+            print(f"[{time.time() - t0:6.0f}s] final {stock} h={h}: "
+                  f"rmse_ratio={r['rmse_ratio']:.4f}", flush=True)
+    final_df = pd.DataFrame(final_rows)
     pd.concat(val_preds).to_csv(OUT / "val_predictions.csv", index=False)
 
-    write_summary(grid_df, ranking, best, abl_df, n_seeds)
+    write_summary(grid_df, ranking, best, abl_df, final_df, n_seeds)
 
 
-def write_summary(grid_df, ranking, best, abl_df, n_seeds):
-    final = abl_df[abl_df["inputs"] == "+ global (all 16)"]
+def write_summary(grid_df, ranking, best, abl_df, final, n_seeds):
     cols = ["stock", "h", "rmse", "rmse_zero", "rmse_train_mean", "rmse_ratio", "dm_p_vs_zero", "mae",
             "direction_acc", "majority_dir", "pred_std", "member_rmse_std", "mean_best_epoch"]
     piv = abl_df.pivot_table(index=["stock", "h"], columns="inputs", values="rmse_ratio")
@@ -196,7 +206,7 @@ def write_summary(grid_df, ranking, best, abl_df, n_seeds):
         "",
         f"Chosen config: `{json.dumps(best)}`",
         "",
-        "## Chosen config, all 16 inputs",
+        "## Final model (chosen config, all 16 inputs in the column order used by --test)",
         "",
         final[cols].round(4).to_markdown(index=False),
         "",
