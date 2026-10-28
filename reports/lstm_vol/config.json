@@ -1,0 +1,5 @@
+{
+  "lookback": 20,
+  "hidden_size": 16,
+  "dropout": 0.2
+}

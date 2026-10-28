@@ -1,8 +1,9 @@
 # LSTM model (Sigurd)
 
-LSTM regressor for the h-day log return, trained on the shared dataset from
-`data/processed/` so it can be compared directly with the random forest:
-same target, same sample dates, same split, same metrics (`evaluate()` in `datasets.py`).
+LSTM regressor for the h-day log return. It uses the shared dataset in
+`data/processed/` with the same target, sample dates, split and metrics
+(`evaluate()` in `datasets.py`) as the random forest, so the two can be compared directly.
+A post-hoc extension that forecasts volatility instead is described in `src/README_lstm_vol.md`.
 
 ## Files
 
@@ -10,22 +11,24 @@ same target, same sample dates, same split, same metrics (`evaluate()` in `datas
 |---|---|
 | `src/lstm_model.py` | `LSTMRegressor` with `fit(X, y)` and `predict(X)`, same interface as the RF |
 | `src/run_lstm.py` | Grid search and input ablation on the validation set, final model (`--final`), test run behind `--test` |
-| `tests/test_lstm.py`, `tests/conftest.py` | Unit tests on synthetic data |
+| `src/lstm_curves.py` | Learning curves of the frozen model (diagnostic, see below) |
+| `tests/test_lstm.py`, `tests/test_lstm_curves.py`, `tests/conftest.py` | Unit tests on synthetic data |
 | `reports/lstm/` | Results: `summary.md`, `grid_val.csv`, `ablation_val.csv`, `config.json`, `metrics.json`, `val_predictions.csv` (`test_metrics.json` after `--test`) |
+| `reports/lstm/curves/` | Learning-curve output from `lstm_curves.py` |
 | `reports/predictions/lstm_<STOCK>_h<h>.csv` | Predictions per stock/horizon, input to `src/intervals.py` |
 
 ## Run
 
 ```
 pip install -r requirements.txt
-python src/run_lstm.py --quick    # check that it runs (about 2 min)
+python src/run_lstm.py --quick    # check that it runs (still trains all six pairs, so several minutes)
 python src/run_lstm.py            # grid + input ablation + final model on val (about 15 to 30 min on a laptop CPU)
 python src/run_lstm.py --final    # only the final model on val, from reports/lstm/config.json
 python src/run_lstm.py --test     # ONCE, at the very end, after RF and LSTM configs are frozen
 ```
 
-No GPU is needed. Results are reproducible for a given seed on the same machine
-and PyTorch version, but small differences between machines are normal.
+No GPU is needed. With the same seed, machine and PyTorch version the results
+repeat exactly; on another machine expect small differences.
 
 ### Modes
 
@@ -56,22 +59,55 @@ step as `--final`.
 | `--max-epochs` | `200` | upper limit on epochs |
 | `--patience` | `20` | early stopping patience (epochs) |
 | `--es-fraction` | `0.15` | share of the training period used for early stopping |
-| `--embargo` | `10` | days dropped between fit part and early-stopping part |
+| `--embargo` | `10` | samples (trading days) dropped between fit part and early-stopping part |
 | `--no-refit-full` | off | skip retraining on all of train after early stopping |
 | `--n-seeds` | 5 (2 with `--quick`) | models averaged per stock/horizon |
 | `--seed` | `0` | base random seed |
 
 ### The final model
 
-There is one final model definition, used by both the val run and `--test`:
+The val run and `--test` use the same final model:
 
 - the config in `reports/lstm/config.json` (`lookback`, `hidden_size`, `dropout`),
 - the inputs in `BASE_FEATURES` order (`FINAL_FEATURES` in `run_lstm.py`),
-- the prediction is the mean over `n_seeds` models.
+- the mean prediction of `n_seeds` models.
 
 The input ablation is a separate study. It builds its own input sets (own stock, then
-adding other stock, Oslo Børs factors, global markets) with its own column order,
-so it does not feed `val_predictions.csv`, `metrics.json` or the prediction files.
+other stock, Oslo Børs factors and global markets) in a different column order, and
+none of its runs end up in `val_predictions.csv`, `metrics.json` or the prediction files.
+
+## Learning curves (diagnostic)
+
+`src/lstm_curves.py` trains the frozen config in `reports/lstm/config.json` without
+early stopping and records the MSE after every epoch. The training is stage 1 of
+`LSTMRegressor.fit` (same seeds, batches and optimiser), just without stopping. It is a
+diagnostic for the report: nothing in it was used to choose a model or a
+hyperparameter, and it never reads the test set.
+
+```
+python src/lstm_curves.py                 # 150 epochs, seeds 0 to 2
+python src/lstm_curves.py --epochs 80     # the run used for the report
+python src/lstm_curves.py --quick         # 2 epochs, 1 seed, writes to reports/lstm/curves/quick/ (gitignored)
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--epochs` | `150` | number of epochs, no early stopping |
+| `--seeds` | `3` | number of seeds (seeds 0 to n-1) |
+| `--quick` | off | 2 epochs, 1 seed, output to `reports/lstm/curves/quick/` |
+
+The runs are the six stock/horizon pairs at the frozen `hidden_size`, plus EQNR h=5
+at `hidden_size` 8 and 128 (capacity check), each with all seeds. The MSE is in
+standardised target units (mean and std of the whole train split, as in
+`LSTMRegressor.fit`) on three parts: the fit part (train minus the last 15 % and the
+10-sample embargo), the early-stopping part (last 15 % of train) and val.
+
+| File in `reports/lstm/curves/` | Content |
+|---|---|
+| `curves.csv` | columns `stock, h, hidden_size, seed, epoch, part, mse`. `part` is `fit`, `es` or `val` for epochs 1 to N. Epoch 0 rows with `fit_ref`, `es_ref`, `val_ref` give the MSE of always predicting the training mean (0 in standardised units, used as reference) |
+| `learning_curves.png` | 2x3 grid (stock x h), mean over seeds, lines for fit/es/val, dashed reference lines, log y axis, epoch of lowest es loss marked |
+| `capacity_eqnr_h5.png` | EQNR h=5 with `hidden_size` 8, 32 and 128 |
+| `curves_summary.md` | per stock/h (and for the capacity runs): `es_min_epoch`, `val_min_epoch`, `val_ratio_at_es_min`, `val_ratio_at_last`, relative to the reference. Numbers only |
 
 ## Tests
 
@@ -80,12 +116,15 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-The tests use synthetic data only and need no network. They take about 25 s.
-They cover: array shapes, window alignment and no look-ahead, label alignment in the
-dataset build, no leak between train/val/test, scaler fitted on train only, the net
-overfitting a tiny batch, learning a planted signal, same seed gives same
-predictions, the Diebold-Mariano test, and the `ValueError` guards in `fit()`
-(`n_seeds < 1`, X/y length mismatch, empty or constant `y`, too few samples).
+The tests use synthetic data only, need no network and take well under 30 s.
+`tests/test_lstm.py` checks array shapes, window alignment (no look-ahead), label
+alignment in the dataset build, that no target crosses from train into val or from val
+into test, that the scaler is fitted on train only, that the net can overfit a tiny
+batch and learn a planted signal, that the same seed gives the same predictions, the
+Diebold-Mariano test, and the `ValueError` guards in `fit()` (`n_seeds < 1`, X/y
+length mismatch, empty or constant `y`, too few samples).
+`tests/test_lstm_curves.py` checks the columns, row count and absence of NaN in a
+2-epoch learning-curve run.
 
 ## Use in `train.py`
 
@@ -130,10 +169,10 @@ $$
 \qquad y_{t,h} = \ln\frac{P_{t+h}}{P_t}
 $$
 
-The additive cell update $c_t = f_t \odot c_{t-1} + \dots$ is why an LSTM can keep
-information over many steps: the gradient through $c_t$ is scaled by $f_t$, not
-repeatedly multiplied by the same weight matrix as in a plain RNN, which reduces
-vanishing gradients.
+The cell update $c_t = f_t \odot c_{t-1} + \dots$ is additive, which lets an LSTM keep
+information over many steps. The gradient through $c_t$ is scaled by $f_t$ instead of
+being multiplied by the same weight matrix at every step as in a plain RNN, so it
+vanishes more slowly.
 
 Training minimises the mean squared error on the standardised target
 $\tilde{y} = (y - \bar{y}_{\text{train}}) / s_{\text{train}}$ with Adam
@@ -150,9 +189,9 @@ PyTorch has two bias vectors per gate, hence $2H$.
 | One layer, 16 or 32 hidden units | About 1 670 training windows and a very noisy target. Larger nets fit noise. |
 | Regression on log returns, not prices | Prices drift (non-stationary). A model on price levels looks good only because $P_{t+h} \approx P_t$. |
 | Target standardised | Raw returns are around 0.01 to 0.05, which gives very small MSE gradients. Undone in `predict()`. |
-| Early stopping on the last 15 % of train, 10-day embargo | Validation stays independent of training. The embargo stops overlapping h-day targets from leaking into the stopping set. |
-| Retrain on all of train for the found number of epochs | The 15 % held out for early stopping is the most recent data, too valuable to drop. |
-| Mean over 5 random seeds | Small nets on noisy data vary a lot between initialisations. Averaging reduces this variance. |
+| Early stopping on the last 15 % of train, 10-sample embargo | Validation stays independent of training. The embargo stops overlapping h-day targets from leaking into the stopping set. |
+| Retrain on all of train for the found number of epochs | The 15 % held out for early stopping is the most recent training data, the part closest to val. |
+| Mean over 5 random seeds | Small nets on noisy data vary a lot between initialisations; the mean of five varies less. |
 | One config for all six stock/horizon pairs | Choosing a separate config for each pair would fit the validation set six times over. |
 | Inputs clipped at ±5 std (in `lstm_data`) | Real extreme days (March 2020) are kept, but cannot dominate the gradients. |
 | Shuffled mini-batches | Each window is an independent sample (state is reset per window), so order inside training does not matter. |
