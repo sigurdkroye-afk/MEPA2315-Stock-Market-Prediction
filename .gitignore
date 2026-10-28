@@ -19,6 +19,8 @@ env/
 *.pth
 checkpoints/
 reports/lstm/quick/
+reports/lstm/curves/quick/
+reports/lstm_vol/quick/
 
 # Secrets
 .env

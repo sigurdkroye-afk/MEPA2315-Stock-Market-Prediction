@@ -4,4 +4,6 @@ pandas
 scikit-learn
 torch
 tabulate
+matplotlib
+arch
 pytest
