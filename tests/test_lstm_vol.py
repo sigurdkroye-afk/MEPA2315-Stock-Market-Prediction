@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from run_lstm_vol import (dm_test, garch_logvol, log_rv, qlike, vol20, vol_data, vol_metrics,
+from run_lstm_vol import (dm_test, garch_logvol, level_ref, log_rv, qlike, vol20, vol_data, vol_metrics,
                           zero_level)
 
 
@@ -106,3 +106,26 @@ def test_qlike_zero_only_for_perfect_forecast():
     assert qlike(z, z) == pytest.approx(0.0)
     assert qlike(z, z + 0.1) > 0
     assert qlike(z, z - 0.1) > 0
+
+
+# f. level-adjusted reference: mean of the last 250 z known at t (windows ending <= t)
+@pytest.mark.parametrize("h", [3, 5, 10])
+def test_level_ref_uses_only_z_known_at_t(h):
+    ret = _ret(700, seed=6)
+    t = 600
+    ref = level_ref(ret, h)
+    z = log_rv(ret, h)
+    assert ref.iloc[t] == pytest.approx(z.iloc[t - h - 249:t - h + 1].mean())
+
+    # The newest z in the window, z[t-h], uses ret[t-h+1..t]: ret[t] matters ...
+    changed = ret.copy()
+    changed.iloc[t] *= 50
+    assert level_ref(changed, h).iloc[t] != pytest.approx(ref.iloc[t])
+    # ... but nothing after t does
+    changed = ret.copy()
+    changed.iloc[t + 1:] *= 50
+    assert level_ref(changed, h).iloc[t] == pytest.approx(ref.iloc[t])
+    # and nothing before the oldest window, ret[t-h-248], either
+    changed = ret.copy()
+    changed.iloc[:t - h - 248] *= 50
+    assert level_ref(changed, h).iloc[t] == pytest.approx(ref.iloc[t])

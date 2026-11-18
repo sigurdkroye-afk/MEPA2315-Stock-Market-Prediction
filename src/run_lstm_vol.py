@@ -58,7 +58,9 @@ LOOKBACKS = [20, 40]
 HIDDEN_SIZES = [16, 32]
 DROPOUT = 0.2
 N_SEEDS = 5
-MODELS = ["lstm", "zero", "vol20", "garch"]
+MODELS = ["lstm", "zero", "level", "vol20", "garch"]
+BASES = ["zero", "level", "vol20", "garch"]
+LEVEL_WINDOW = 250       # locked on val before the test run
 
 
 # ------------------------------------------------------------ target and baselines
@@ -66,6 +68,13 @@ def log_rv(ret: pd.Series, h: int) -> pd.Series:
     """z[t] = log sqrt(ret[t+1]^2 + ... + ret[t+h]^2). ret[t] itself is not included."""
     future = sum(ret.shift(-k) ** 2 for k in range(1, h + 1))
     return np.log(np.sqrt(future))
+
+
+def level_ref(ret: pd.Series, h: int, window: int = LEVEL_WINDOW) -> pd.Series:
+    """Level-adjusted reference: mean of the last `window` values of z known at the close
+    of day t. z[s] uses ret[s+1..s+h], so it is known at t only if s + h <= t. The forecast
+    is mean(z[t-h-window+1 .. t-h]), i.e. only windows that ended on or before t."""
+    return log_rv(ret, h).rolling(window).mean().shift(h)
 
 
 def vol20(ret: pd.Series, h: int) -> pd.Series:
@@ -156,22 +165,28 @@ def run_pair(df, stock, h, cfg, n_seeds, garch, parts=("val",)):
     model = LSTMRegressor(hidden_size=cfg["hidden_size"], dropout=cfg["dropout"],
                           n_seeds=n_seeds).fit(X_tr, z_tr)
     v20 = vol20(df[f"{stock}_ret"], h)
+    lvl = level_ref(df[f"{stock}_ret"], h)
     out = {}
     for part in parts:
         X, z, dates = d[part]
         members = model.predict_members(X).astype(float)      # (n_seeds, n)
         f = {"lstm": members.mean(axis=0),                     # same as model.predict(X)
              "zero": np.full(len(z), zero_level(d)),
+             "level": lvl.loc[dates].to_numpy(),
              "vol20": v20.loc[dates].to_numpy(),
              "garch": garch[h].loc[dates].to_numpy()}
         for name, v in f.items():
             assert np.isfinite(v).all(), f"{stock} h={h} {part}: {name} forecast has NaN"
         m = {name: vol_metrics(z, v) for name, v in f.items()}
         loss = {name: (v - z) ** 2 for name, v in f.items()}
-        for base in ("zero", "vol20", "garch"):
+        for base in BASES:
             m["lstm"][f"ratio_vs_{base}"] = m["lstm"]["mse_log"] / m[base]["mse_log"]
             m["lstm"][f"dm_p_vs_{base}"] = dm_test(loss["lstm"], loss[base], h)
-        m["lstm"]["qlike_ratio_vs_zero"] = m["lstm"]["qlike"] / m["zero"]["qlike"]
+            m["lstm"][f"qlike_ratio_vs_{base}"] = m["lstm"]["qlike"] / m[base]["qlike"]
+            # same test on the QLIKE loss
+            x = {k: np.exp(2 * (z - f[k])) for k in ("lstm", base)}
+            m["lstm"][f"dm_qlike_p_vs_{base}"] = dm_test(x["lstm"] - np.log(x["lstm"]),
+                                                         x[base] - np.log(x[base]), h)
         seed_ratio = [np.mean((p - z) ** 2) / m["zero"]["mse_log"] for p in members]
         m["lstm"]["seed_ratio_vs_zero_mean"] = float(np.mean(seed_ratio))
         m["lstm"]["seed_ratio_vs_zero_std"] = float(np.std(seed_ratio))
@@ -243,6 +258,7 @@ def final_step(df, cfg, n_seeds, garch, garch_params, out_dir, pred_dir, parts=(
                 plot_eqnr_h5(res["val"][1], out_dir / "eqnr_h5_val.png")
 
     meta = {"config": cfg, "features": "BASE_FEATURES", "n_seeds": n_seeds,
+            "level_window": LEVEL_WINDOW,
             "torch_version": torch.__version__, "arch_version": arch.__version__,
             "garch_params_fitted_before_val": garch_params}
     part = "test" if "test" in parts else "val"
@@ -262,6 +278,39 @@ def plot_eqnr_h5(f: pd.DataFrame, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def level_rows(doc: dict) -> list[dict]:
+    """LSTM against the level-adjusted reference, one row per stock and horizon."""
+    rows = []
+    for stock, hs in doc["results"].items():
+        for hk, m in hs.items():
+            lm, rm = m["lstm"], m["level"]
+            rows.append({"stock": stock, "h": int(hk[1:]),
+                         "mse_lstm": lm["mse_log"], "mse_level": rm["mse_log"],
+                         "ratio_vs_level": lm["ratio_vs_level"], "dm_p_vs_level": lm["dm_p_vs_level"],
+                         "qlike_lstm": lm["qlike"], "qlike_level": rm["qlike"],
+                         "qlike_ratio_vs_level": lm["qlike_ratio_vs_level"],
+                         "dm_qlike_p_vs_level": lm["dm_qlike_p_vs_level"]})
+    return rows
+
+
+def write_level_table(out_dir: Path, part: str) -> None:
+    """level_<part>.md and level_<part>.tex from metrics_<part>.json."""
+    doc = json.loads((out_dir / f"metrics_{part}.json").read_text())
+    rows = level_rows(doc)
+    (out_dir / f"level_{part}.md").write_text(
+        f"# LSTM vs level-adjusted reference ({part})\n\n"
+        f"level = mean of the last {doc['level_window']} values of z known at the close of day t "
+        "(z[t-h-249..t-h]).\n\n" + pd.DataFrame(rows).round(4).to_markdown(index=False) + "\n")
+    p = lambda v: "<0.001" if v < 0.001 else f"{v:.3f}"
+    body = [f"{r['stock']} & {r['h']} & {r['mse_lstm']:.4f} & {r['mse_level']:.4f} & "
+            f"{r['ratio_vs_level']:.3f} & {p(r['dm_p_vs_level'])} & {r['qlike_lstm']:.4f} & "
+            f"{r['qlike_level']:.4f} & {p(r['dm_qlike_p_vs_level'])} \\\\" for r in rows]
+    tex = [r"\begin{tabular}{lrrrrrrrr}", r"\toprule",
+           r"Aksje & $h$ & MSE LSTM & MSE ref. & Forhold & DM $p$ & QLIKE LSTM & QLIKE ref. & DM $p$ \\",
+           r"\midrule", *body, r"\bottomrule", r"\end{tabular}", ""]
+    (out_dir / f"level_{part}.tex").write_text("\n".join(tex))
 
 
 def write_summary(out_dir: Path) -> None:
@@ -290,7 +339,8 @@ def write_summary(out_dir: Path) -> None:
                               "seed_ratio_mean": lm["seed_ratio_vs_zero_mean"],
                               "seed_ratio_std": lm["seed_ratio_vs_zero_std"]})
             lstm_rows.append({"stock": stock, "h": int(hk[1:]),
-                              **{k: m["lstm"][k] for k in ("ratio_vs_vol20", "dm_p_vs_vol20",
+                              **{k: m["lstm"][k] for k in ("ratio_vs_level", "dm_p_vs_level",
+                                                           "ratio_vs_vol20", "dm_p_vs_vol20",
                                                            "ratio_vs_garch", "dm_p_vs_garch")}})
     lines = [
         "# LSTM volatility, validation results (2023-2024)",
@@ -318,7 +368,9 @@ def write_summary(out_dir: Path) -> None:
         "",
         pd.DataFrame(dec_rows).round(4).to_markdown(index=False),
         "",
-        "## LSTM against vol20 and garch (mse_log ratio and Diebold-Mariano p-value)",
+        "## LSTM against level, vol20 and garch (mse_log ratio and Diebold-Mariano p-value)",
+        "",
+        f"level = mean of the last {doc['level_window']} values of z known at the close of day t.",
         "",
         pd.DataFrame(lstm_rows).round(4).to_markdown(index=False),
         "",
@@ -357,6 +409,7 @@ def main():
 
     parts = ("val", "test") if args.test else ("val",)
     final_step(df, cfg, n_seeds, garch, params, out_dir, pred_dir, parts)
+    write_level_table(out_dir, "test" if args.test else "val")
     if not args.test:
         write_summary(out_dir)
         print((out_dir / "summary.md").read_text())

@@ -49,6 +49,7 @@ All forecasts are log volatility over $h$ days, so every model is on the same sc
 | Name | Forecast made on day $t$ |
 |---|---|
 | `zero` | mean of $z$ over the train samples. `LSTMRegressor` standardises the target with the train mean and std, so this is the forecast 0 in the model's own units, the counterpart of the zero-return forecast for the return model |
+| `level` | level-adjusted reference: mean of the last 250 values of $z$ known at the close of day $t$, $\frac{1}{250}\sum_{j=0}^{249} z_{t-h-j,h}$. $z_{s,h}$ uses $r_{s+1},\dots,r_{s+h}$, so only windows that ended on or before $t$ enter. Unlike `zero` it follows the level over time; it has no fitted parameters. The window (250) was fixed on val before the one test run |
 | `vol20` | $\ln\big(\sqrt{h}\,\hat\sigma_t\big)$, with $\hat\sigma_t$ the sample std of $r_{t-19}, \dots, r_t$ |
 | `garch` | GARCH(1,1) with Student-t errors (`arch`) on $100\,r$. Parameters are fitted only on data before the first val date, the same rule as `intervals.py`. The $h$-day variance is the sum of the 1- to $h$-step variance forecasts made at $t$, using returns up to and including $t$; the forecast is $\ln(\sqrt{\text{var}}/100)$ |
 
@@ -79,9 +80,10 @@ LSTM only:
 
 | Field | Meaning |
 |---|---|
-| `ratio_vs_zero`, `ratio_vs_vol20`, `ratio_vs_garch` | `mse_log` of the LSTM divided by that of the baseline. Below 1 means the LSTM is better |
-| `dm_p_vs_zero`, `dm_p_vs_vol20`, `dm_p_vs_garch` | two-sided Diebold-Mariano p-value on the difference in squared log errors. The targets overlap, so the variance uses Newey-West weights up to lag $h-1$ |
-| `qlike_ratio_vs_zero` | `qlike` of the LSTM divided by that of `zero` |
+| `ratio_vs_<base>` | `mse_log` of the LSTM divided by that of the baseline. Below 1 means the LSTM is better |
+| `dm_p_vs_<base>` (`zero`, `level`, `vol20`, `garch`) | two-sided Diebold-Mariano p-value on the difference in squared log errors. The targets overlap, so the variance uses Newey-West weights up to lag $h-1$ |
+| `qlike_ratio_vs_<base>` | `qlike` of the LSTM divided by that of the baseline |
+| `dm_qlike_p_vs_<base>` | as `dm_p_vs_<base>`, but on the QLIKE loss |
 | `seed_ratio_vs_zero_mean`, `seed_ratio_vs_zero_std` | mean and std over the seeds of each single model's `ratio_vs_zero` (from `predict_members`) |
 | `mean_best_epoch` | mean early-stopping epoch over the seeds |
 
@@ -90,11 +92,13 @@ LSTM only:
 | File | Content |
 |---|---|
 | `src/run_lstm_vol.py` | target, baselines, metrics, grid, final step |
-| `tests/test_lstm_vol.py` | target alignment, `vol20` window, GARCH fitted before val only, sample rows, `zero` = train mean of $z$, Diebold-Mariano, QLIKE |
+| `tests/test_lstm_vol.py` | target alignment, `vol20` window, `level` uses only $z$ known at $t$, GARCH fitted before val only, sample rows, `zero` = train mean of $z$, Diebold-Mariano, QLIKE |
 | `reports/lstm_vol/grid_val.csv` | every grid config on every stock/horizon (LSTM metrics) |
 | `reports/lstm_vol/config.json` | the chosen config |
 | `reports/lstm_vol/metrics_val.json` | `config`, `n_seeds`, versions, the GARCH parameters, `split`, and `results[STOCK]["h<h>"][model]` with the fields above |
 | `reports/lstm_vol/summary.md` | tables built from `grid_val.csv` and `metrics_val.json`, including "LSTM vs zero forecast (val)"; no interpretation |
+| `reports/lstm_vol/level_val.md`, `level_test.md`, `level_val.tex`, `level_test.tex` | LSTM vs `level`: MSE of log volatility, QLIKE and DM p-values (MSE and QLIKE loss), per stock and horizon |
+| `reports/lstm_vol/metrics_test.json` | as `metrics_val.json`, on test (written once by `--test`) |
 | `reports/lstm_vol/eqnr_h5_val.png` | actual $z$ and the `lstm`, `garch` and `vol20` forecasts, EQNR h=5, val |
 
 ## Prediction files
